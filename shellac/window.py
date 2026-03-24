@@ -12,13 +12,20 @@ from fastapi.responses import HTMLResponse
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException, NoSuchWindowException
 
+# Note: These imports assume the structure of your package
 from .enums import Browser
 from .models import WindowConfig, Event
 from .launcher import BrowserLauncher
 
 
 class Window:
+    """
+    Represents a WebUI window instance that manages a FastAPI backend 
+    and a Selenium-controlled browser frontend.
+    """
+
     def __init__(self):
+        """Initializes a new Window instance with default configurations."""
         self.config = WindowConfig()
         self.port = self._get_free_port()
         self.app = FastAPI()
@@ -28,12 +35,14 @@ class Window:
         self._running = False
         self._setup_routes()
 
-    def _get_free_port(self):
+    def _get_free_port(self) -> int:
+        """Finds an available TCP port on the localhost."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
             return s.getsockname()[1]
 
     def _get_bridge_js(self) -> str:
+        """Returns the JavaScript bridge code for Python-JS communication."""
         return """
         if (typeof window.webui === 'undefined') {
             window._webui_queue = [];
@@ -58,6 +67,7 @@ class Window:
         """
 
     def _setup_routes(self):
+        """Configures the internal FastAPI routes."""
         @self.app.get("/")
         async def index():
             content = self._html_content or "<html><body>No Content</body></html>"
@@ -67,6 +77,7 @@ class Window:
             return HTMLResponse(bridge + content)
 
     def _bind_target(self, target: Any, prefix: str = "", exact_name: bool = False):
+        """Internal helper to map functions or class methods to the registry."""
         if inspect.isfunction(target) or inspect.ismethod(target):
             name = prefix if (exact_name and prefix) else (f"{prefix}.{target.__name__}" if prefix else target.__name__)
             self.bindings[name] = target
@@ -87,6 +98,26 @@ class Window:
                         self.bindings[bind_name] = attr
 
     def bind(self, name_or_target: Union[str, Any] = None, target: Optional[Any] = None):
+        """
+        Binds a Python function, class, or instance to be callable from JavaScript.
+
+        This method can be used as a decorator or as a direct function call.
+
+        Args:
+            name_or_target (Union[str, Any], optional): The name/prefix for the binding 
+                or the target itself if no name is provided.
+            target (Any, optional): The function or class instance to bind (only used 
+                if name_or_target is a string).
+
+        Returns:
+            The original target or a decorator function.
+
+        Examples:
+            >>> win.bind("say_hello", lambda e: "Hello!")
+            >>> @win.bind("math")
+            ... class Math:
+            ...     def add(self, e): return e.data[0] + e.data[1]
+        """
         if isinstance(name_or_target, str) and target is not None:
             is_func = inspect.isfunction(target) or inspect.ismethod(target)
             self._bind_target(target, prefix=name_or_target, exact_name=is_func)
@@ -106,6 +137,13 @@ class Window:
         return self
 
     def navigate(self, url_or_html: str):
+        """
+        Navigates the current window to a new URL, a local file, or raw HTML content.
+
+        Args:
+            url_or_html (str): A web URL (http://...), a path to a .html file, 
+                or a raw HTML string.
+        """
         if not self.driver:
             return
             
@@ -125,12 +163,22 @@ class Window:
             self.driver.get(f"http://127.0.0.1:{self.port}/")
 
     def run_js(self, script: str) -> Any:
+        """
+        Executes synchronous JavaScript code in the browser.
+
+        Args:
+            script (str): The JavaScript code to execute.
+
+        Returns:
+            Any: The result returned by the JavaScript execution.
+        """
         if self.driver:
             try: return self.driver.execute_script(script)
             except Exception as e: print(f"[WebUI] JS Execution Error: {e}")
         return None
 
     def close(self):
+        """Closes the browser window and shuts down the backend server."""
         self._running = False
         if self.driver:
             try: self.driver.quit()
@@ -138,17 +186,37 @@ class Window:
             self.driver = None
 
     def set_size(self, width: int, height: int):
+        """
+        Resizes the browser window.
+
+        Args:
+            width (int): Target width in pixels.
+            height (int): Target height in pixels.
+        """
         self.config.width = width
         self.config.height = height
         if self.driver: self.driver.set_window_size(width, height)
 
     def set_title(self, title: str):
+        """
+        Updates the browser window title.
+
+        Args:
+            title (str): The new title string.
+        """
         self.run_js(f"document.title = {json.dumps(title)};")
 
     def is_running(self) -> bool:
+        """
+        Checks if the window and backend are currently running.
+
+        Returns:
+            bool: True if running, False otherwise.
+        """
         return self._running
 
     def _bridge_monitor(self):  
+        """Internal background thread that polls the JS bridge for incoming calls."""
         while self._running:
             if self.driver:
                 try:
@@ -177,6 +245,13 @@ class Window:
             time.sleep(0.05) 
 
     def show(self, content: str, browser: Browser = Browser.AnyBrowser):
+        """
+        Starts the backend server and launches the browser window.
+
+        Args:
+            content (str): The URL, HTML file path, or HTML string to display.
+            browser (Browser): The browser engine to use (defaults to AnyBrowser).
+        """
         self._running = True
         is_url = content.startswith(('http://', 'https://', 'file://'))
         if not is_url:
@@ -206,6 +281,9 @@ class Window:
         threading.Thread(target=self._bridge_monitor, daemon=True).start()
 
     def wait(self):
+        """
+        Blocks the main thread until the browser window is closed.
+        """
         try:
             while self._running:
                 if self.driver:

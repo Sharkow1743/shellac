@@ -100,23 +100,6 @@ class Window:
     def bind(self, name_or_target: Union[str, Any] = None, target: Optional[Any] = None):
         """
         Binds a Python function, class, or instance to be callable from JavaScript.
-
-        This method can be used as a decorator or as a direct function call.
-
-        Args:
-            name_or_target (Union[str, Any], optional): The name/prefix for the binding 
-                or the target itself if no name is provided.
-            target (Any, optional): The function or class instance to bind (only used 
-                if name_or_target is a string).
-
-        Returns:
-            The original target or a decorator function.
-
-        Examples:
-            >>> win.bind("say_hello", lambda e: "Hello!")
-            >>> @win.bind("math")
-            ... class Math:
-            ...     def add(self, e): return e.data[0] + e.data[1]
         """
         if isinstance(name_or_target, str) and target is not None:
             is_func = inspect.isfunction(target) or inspect.ismethod(target)
@@ -136,91 +119,14 @@ class Window:
             
         return self
 
-    def navigate(self, url_or_html: str):
-        """
-        Navigates the current window to a new URL, a local file, or raw HTML content.
-
-        Args:
-            url_or_html (str): A web URL (http://...), a path to a .html file, 
-                or a raw HTML string.
-        """
-        if not self.driver:
-            return
-            
-        is_url = url_or_html.startswith(('http://', 'https://', 'file://'))
-        if is_url:
-            self.driver.get(url_or_html)
-        else:
-            try:
-                if len(url_or_html) < 1000 and os.path.exists(url_or_html):
-                    with open(url_or_html, 'r', encoding='utf-8') as f:
-                        self._html_content = f.read()
-                else:
-                    self._html_content = url_or_html
-            except OSError:
-                self._html_content = url_or_html
-                
-            self.driver.get(f"http://127.0.0.1:{self.port}/")
-
-    def run_js(self, script: str) -> Any:
-        """
-        Executes synchronous JavaScript code in the browser.
-
-        Args:
-            script (str): The JavaScript code to execute.
-
-        Returns:
-            Any: The result returned by the JavaScript execution.
-        """
-        if self.driver:
-            try: return self.driver.execute_script(script)
-            except Exception as e: print(f"[WebUI] JS Execution Error: {e}")
-        return None
-
-    def close(self):
-        """Closes the browser window and shuts down the backend server."""
-        self._running = False
-        if self.driver:
-            try: self.driver.quit()
-            except Exception: pass
-            self.driver = None
-
-    def set_size(self, width: int, height: int):
-        """
-        Resizes the browser window.
-
-        Args:
-            width (int): Target width in pixels.
-            height (int): Target height in pixels.
-        """
-        self.config.width = width
-        self.config.height = height
-        if self.driver: self.driver.set_window_size(width, height)
-
-    def set_title(self, title: str):
-        """
-        Updates the browser window title.
-
-        Args:
-            title (str): The new title string.
-        """
-        self.run_js(f"document.title = {json.dumps(title)};")
-
-    def is_running(self) -> bool:
-        """
-        Checks if the window and backend are currently running.
-
-        Returns:
-            bool: True if running, False otherwise.
-        """
-        return self._running
-
     def _bridge_monitor(self):  
         """Internal background thread that polls the JS bridge for incoming calls."""
         while self._running:
             if self.driver:
                 try:
-                    exists = self.driver.execute_script("return (typeof window.webui !== 'undefined' && typeof window._webui_resolve !== 'undefined');")
+                    exists = self.driver.execute_script(
+                        "return (typeof window.webui !== 'undefined' && typeof window._webui_resolve !== 'undefined');"
+                    )
                     if not exists:
                         self.driver.execute_script(self._get_bridge_js())
                     
@@ -231,27 +137,57 @@ class Window:
                     """)
                     
                     for event_data in (events or []):
-                        fn = event_data.get('fn')
+                        fn_name = event_data.get('fn')
                         call_id = event_data.get('id')
-                        if fn in self.bindings:
-                            event = Event(window=self, element=fn, data=event_data.get('args', []))
-                            cb = self.bindings[fn]
-                            result = cb(event)
-                            result_json = json.dumps(result)
-                            self.driver.execute_script(f"window._webui_resolve({call_id}, {result_json});")
+                        js_args = event_data.get('args', [])
+
+                        if fn_name in self.bindings:
+                            cb = self.bindings[fn_name]
+                            
+                            sig = inspect.signature(cb)
+                            params = list(sig.parameters.values())
+                            
+                            wants_event = any(p.annotation is Event for p in params) or \
+                                          (params and params[0].name == 'event')
+
+                            try:
+                                if wants_event:
+                                    event_obj = Event(window=self, element=fn_name, data=js_args)
+                                    
+                                    expects_extra_args = len(params) > 1 or any(
+                                        p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+                                    )
+
+                                    if expects_extra_args:
+                                        result = cb(event_obj, *js_args)
+                                    else:
+                                        result = cb(event_obj)
+                                else:
+                                    result = cb(*js_args)
+                                
+                                result_json = json.dumps(result)
+                                self.driver.execute_script(f"window._webui_resolve({call_id}, {result_json});")
+                                
+                            except Exception as e:
+                                self.driver.execute_script(f"window._webui_resolve({call_id}, null);")
                             
                 except Exception:
                     pass
-            time.sleep(0.05) 
+            time.sleep(0.05)
+            
+    def navigate(self, url_or_html: str):
+        if not self.driver: return
+        is_url = url_or_html.startswith(('http://', 'https://', 'file://'))
+        if is_url: self.driver.get(url_or_html)
+        else:
+            try:
+                if len(url_or_html) < 1000 and os.path.exists(url_or_html):
+                    with open(url_or_html, 'r', encoding='utf-8') as f: self._html_content = f.read()
+                else: self._html_content = url_or_html
+            except OSError: self._html_content = url_or_html
+            self.driver.get(f"http://127.0.0.1:{self.port}/")
 
     def show(self, content: str, browser: Browser = Browser.AnyBrowser):
-        """
-        Starts the backend server and launches the browser window.
-
-        Args:
-            content (str): The URL, HTML file path, or HTML string to display.
-            browser (Browser): The browser engine to use (defaults to AnyBrowser).
-        """
         self._running = True
         is_url = content.startswith(('http://', 'https://', 'file://'))
         if not is_url:
@@ -259,11 +195,9 @@ class Window:
                 if len(content) < 1000 and os.path.exists(content):
                     with open(content, 'r', encoding='utf-8') as f: self._html_content = f.read()
                 else: self._html_content = content
-            except OSError:
-                self._html_content = content
+            except OSError: self._html_content = content
             url = f"http://127.0.0.1:{self.port}/"
-        else:
-            url = content
+        else: url = content
 
         threading.Thread(target=uvicorn.run, args=(self.app,), 
                          kwargs={"host": "127.0.0.1", "port": self.port, "log_level": "error"}, 
@@ -277,21 +211,21 @@ class Window:
                     break
 
         self.driver = BrowserLauncher.create_driver(target, url, self.config)
-        self.driver.get(url)
         threading.Thread(target=self._bridge_monitor, daemon=True).start()
 
     def wait(self):
-        """
-        Blocks the main thread until the browser window is closed.
-        """
         try:
             while self._running:
                 if self.driver:
-                    try:
-                        _ = self.driver.window_handles
-                    except (NoSuchWindowException, WebDriverException):
-                        break
+                    try: _ = self.driver.window_handles
+                    except (NoSuchWindowException, WebDriverException): break
                 time.sleep(1)
         except KeyboardInterrupt: pass
-        finally:
-            self.close()
+        finally: self.close()
+
+    def close(self):
+        self._running = False
+        if self.driver:
+            try: self.driver.quit()
+            except: pass
+            self.driver = None

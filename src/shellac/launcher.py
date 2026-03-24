@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import Optional
 
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.edge.service import Service as EdgeService
+from selenium.webdriver.chrome.service import Service as ChromeService
 
 from .enums import Browser
 from .models import WindowConfig
+
 
 class BrowserLauncher:
     @staticmethod
@@ -66,33 +67,70 @@ class BrowserLauncher:
                 """)
         return temp_dir
 
-    @classmethod
-    def create_driver(cls, browser: Browser, url: str, config: WindowConfig) -> webdriver.Remote:
-        path = cls.get_path(browser)
-        
-        if browser in [Browser.Chrome, Browser.Edge, Browser.Chromium, Browser.Brave, Browser.Vivaldi]:
-            is_edge = browser == Browser.Edge
-            options = webdriver.EdgeOptions() if is_edge else webdriver.ChromeOptions()
-            if path: options.binary_location = path
+    @staticmethod
+    def _patch_driver_pool(driver: webdriver.Remote, size: int = 20):
+        """
+        Manually increases the connection pool size of the driver's 
+        internal urllib3 PoolManager to prevent 'pool is full' warnings.
+        """
+        try:
+            # Access the command_executor (RemoteConnection)
+            executor = driver.command_executor
             
+            # Selenium 4.x uses a PoolManager stored in _conn
+            if hasattr(executor, '_conn'):
+                # Update the pool keywords for new connections
+                executor._conn.connection_pool_kw['maxsize'] = size
+                executor._conn.connection_pool_kw['block'] = False
+                
+                # Clear the current pool to force it to re-initialize with new settings
+                executor._conn.clear()
+        except Exception as e:
+            # We fail silently or log as this is a 'nice-to-have' optimization
+            print(f"[WebUI] Warning: Could not patch connection pool: {e}")
+
+    @classmethod
+    def create_driver(cls, browser: "Browser", url: str, config: "WindowConfig") -> webdriver.Remote:
+        path = cls.get_path(browser)
+        driver = None
+
+        # --- CHROMIUM BASED BROWSERS (Chrome, Edge, Brave, etc.) ---
+        if browser in ["Browser.Chrome", "Browser.Edge", "Browser.Chromium", "Browser.Brave", "Browser.Vivaldi"] or any(b in str(browser) for b in ["Chrome", "Edge"]):
+            is_edge = "Edge" in str(browser)
+            options = webdriver.EdgeOptions() if is_edge else webdriver.ChromeOptions()
+            
+            if path: 
+                options.binary_location = path
+            
+            # UI Tweaks
             if config.hide_controls:
                 options.add_argument(f"--app={url}")
             
+            # Security and Stability
             options.add_argument("--disable-web-security")
             options.add_argument("--allow-running-insecure-content") 
             options.add_argument("--disable-site-isolation-trials")
             options.add_argument(f"--user-data-dir={tempfile.mkdtemp()}") 
-            
             options.add_argument(f"--window-size={config.width},{config.height}")
+            
+            # Remove "Chrome is being controlled by automated software" infobar
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             
-            return (webdriver.Edge(options=options) if is_edge else webdriver.Chrome(options=options))
+            # Initialize Driver
+            if is_edge:
+                service = EdgeService()
+                driver = webdriver.Edge(options=options, service=service)
+            else:
+                service = ChromeService()
+                driver = webdriver.Chrome(options=options, service=service)
 
-        elif browser == Browser.Firefox:
+        # --- FIREFOX ---
+        elif "Firefox" in str(browser):
             profile_path = cls.prepare_firefox_profile(config) 
 
             options = webdriver.FirefoxOptions()
-            if path: options.binary_location = path
+            if path: 
+                options.binary_location = path
             
             options.add_argument("-profile")
             options.add_argument(profile_path)
@@ -104,7 +142,14 @@ class BrowserLauncher:
                 
             service = FirefoxService()
             driver = webdriver.Firefox(service=service, options=options)
+            # Firefox handles initial window sizing better via command after launch
             driver.set_window_size(config.width, config.height)
+
+        if driver:
+            # APPLY THE POOL FIX
+            # This prevents the 'Connection pool is full' warnings 
+            # caused by multi-threaded polling.
+            cls._patch_driver_pool(driver, size=20)
             return driver
 
         raise ValueError(f"Unsupported browser: {browser}")

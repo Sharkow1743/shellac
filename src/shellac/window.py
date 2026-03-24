@@ -12,15 +12,10 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException, NoSuchWindowException
-from selenium.webdriver.remote.remote_connection import RemoteConnection
 
 from .enums import Browser
 from .models import WindowConfig, Event
 from .launcher import BrowserLauncher
-
-RemoteConnection._conn_pool_size = 20
-urllib3.connectionpool.HTTPConnectionPool.default_maxsize = 20
-urllib3.connectionpool.HTTPSConnectionPool.default_maxsize = 20
 
 class Window:
     """
@@ -351,7 +346,7 @@ class Window:
                         _ = self.driver.window_handles
                     except (NoSuchWindowException, WebDriverException):
                         break
-                time.sleep(1)
+                time.sleep(2)
         except KeyboardInterrupt: pass
         finally:
             self.close()

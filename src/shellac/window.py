@@ -11,12 +11,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException, NoSuchWindowException
+from selenium.webdriver.remote.remote_connection import RemoteConnection
 
-# Note: These imports assume the structure of your package
 from .enums import Browser
 from .models import WindowConfig, Event
 from .launcher import BrowserLauncher
 
+RemoteConnection._conn_pool_size = 20
 
 class Window:
     """
